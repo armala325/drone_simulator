@@ -7,7 +7,6 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 
 WorldInfo {
   title "Drone Swarm Simulation"
-  basicTimeStep 16
 }
 Viewpoint {
   orientation -0.5773502691896258 0.5773502691896258 0.5773502691896258 2.0944
@@ -26,7 +25,7 @@ Robot {
   supervisor TRUE
 }
 DEF drone_0 Mavic2Pro {
-  translation 0 0 0.12
+  translation 0 0 5
   name "drone_0"
-  controller "drone_controller"
+  controller "<none>"
 }
