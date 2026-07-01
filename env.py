@@ -136,7 +136,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                     action = np.zeros(3, dtype=np.float32)
                 node.setVelocity([float(action[0]), float(action[1]), float(action[2]), 0, 0, 0])
 
-        for _ in range(4): 
+        for _ in range(8): 
             self.supervisor.step(self.timestep)
 
         newly_covered_cells = 0
