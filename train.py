@@ -189,6 +189,7 @@ model_config = MlpConfig.get_from_yaml()
 critic_model_config = MlpConfig.get_from_yaml()
 experiment_config = ExperimentConfig.get_from_yaml()
 experiment_config.loggers = ["csv"]
+experiment_config.clip_grad_norm = True
 
 # 4. Initialize the Experiment correctly using 'task' instead of 'env'
 experiment = Experiment(

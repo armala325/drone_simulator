@@ -131,6 +131,9 @@ class WebotsDroneCoverageEnv(ParallelEnv):
         for i, action in enumerate(actions):
             node = self.drones[i]
             if node is not None:
+                if np.isnan(action).any() or np.isinf(action).any():
+                    print(f"\n[WARNING] NaN/Inf action detected for drone_{i}! Forcing hover.")
+                    action = np.zeros(3, dtype=np.float32)
                 node.setVelocity([float(action[0]), float(action[1]), float(action[2]), 0, 0, 0])
 
         for _ in range(4): 
@@ -147,7 +150,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                     self.coverage_grid[grid_x, grid_y] = 1
                     newly_covered_cells += 1
 
-        team_reward = float(newly_covered_cells * 10.0)
+        team_reward = float(newly_covered_cells * 0.1)
         rewards = {agent: team_reward for agent in self.agents}
 
         crashed = any(d.getPosition()[2] < 0.2 for d in self.drones)
