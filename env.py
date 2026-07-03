@@ -2,7 +2,7 @@ import os
 import sys
 import numpy as np
 from pettingzoo.utils.env import ParallelEnv
-from gymnasium.spaces import Box, Dict
+from gymnasium.spaces import Box
 
 if "WEBOTS_CONTROLLER_URL" in os.environ:
     del os.environ["WEBOTS_CONTROLLER_URL"]
@@ -55,7 +55,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                 self.drones.append(drone)
                 continue
             
-            # Clean linear spacing along the X axis on the ground
+            # Linear spacing along the X axis on the ground
             x = i * spacing
             y = 0.0
             z = INITIAL_HEIGHT
@@ -90,7 +90,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
         
         # Action Spaces: Target flight velocities [vx, vy, vz]
         self.action_spaces = {
-            agent: Box(low=-2.0, high=2.0, shape=(3,), dtype=np.float32)
+            agent: Box(low=-5.0, high=5.0, shape=(3,), dtype=np.float32)
             for agent in self.agents
         }
 
@@ -123,7 +123,6 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                 pos = drone.getPosition()   # [X, Y, Z]
                 vel = drone.getVelocity()   # [Vx, Vy, Vz, Wx, Wy, Wz]
             
-                # FIXED: Map observations to agent string IDs (e.g., 'drone_0') instead of raw indices
                 obs[self.agents[i]] = np.array([pos[2], vel[0], vel[1], 1.0], dtype=np.float32)
         return obs
 
@@ -136,7 +135,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                     action = np.zeros(3, dtype=np.float32)
                 node.setVelocity([float(action[0]), float(action[1]), float(action[2]), 0, 0, 0])
 
-        for _ in range(8): 
+        for _ in range(12): 
             self.supervisor.step(self.timestep)
 
         newly_covered_cells = 0
@@ -150,7 +149,7 @@ class WebotsDroneCoverageEnv(ParallelEnv):
                     self.coverage_grid[grid_x, grid_y] = 1
                     newly_covered_cells += 1
 
-        team_reward = float(newly_covered_cells * 0.1)
+        team_reward = float(newly_covered_cells * 1)
         rewards = {agent: team_reward for agent in self.agents}
 
         crashed = any(d.getPosition()[2] < 0.2 for d in self.drones)
@@ -159,3 +158,111 @@ class WebotsDroneCoverageEnv(ParallelEnv):
 
         observations = self._get_observations()
         return observations, rewards, terminations, truncations, {agent: {} for agent in self.agents}
+    
+
+from typing import Optional
+import torch
+from torchrl.data import Composite
+from tensordict import TensorDict
+from torchrl.envs import EnvBase
+from torchrl.data import Composite, UnboundedContinuous, Bounded, UnboundedDiscrete
+
+class BenchMarlWebotsWrapper(EnvBase):
+    def __init__(self, pz_env, device="cpu"):
+        # BenchMARL uses an empty root batch size for the environment level
+        super().__init__(device=device, batch_size=torch.Size([]))
+        self.pz_env = pz_env
+        self.num_drones = pz_env.num_drones
+        self.agents = pz_env.agents
+        
+        # Sample an observation and action to infer shape sizes automatically
+        sample_obs = pz_env.observation_space(self.agents[0]).sample()
+        sample_act = pz_env.action_space(self.agents[0]).sample()
+        self.obs_dim = sample_obs.shape[0]
+        self.action_dim = sample_act.shape[0]
+        
+        # 1. Observation Spec: Structured under the "agents" group name
+        self.observation_spec = Composite({
+            "agents": Composite({
+                "observation": UnboundedContinuous(
+                    shape=torch.Size([self.num_drones, self.obs_dim]),
+                    device=device
+                )
+            }, batch_size=torch.Size([self.num_drones]))
+        })
+        
+        # 2. Action Spec: Structured under the "agents" group name with bounds
+        act_space = pz_env.action_space(self.agents[0])
+        low = torch.tensor(act_space.low, device=device).unsqueeze(0).expand(self.num_drones, -1)
+        high = torch.tensor(act_space.high, device=device).unsqueeze(0).expand(self.num_drones, -1)
+        
+        self.action_spec = Composite({
+            "agents": Composite({
+                "action": Bounded(
+                    low=low, high=high,
+                    shape=torch.Size([self.num_drones, self.action_dim]),
+                    device=device
+                )
+            }, batch_size=torch.Size([self.num_drones]))
+        })
+        
+        # 3. Reward Spec: Stacked reward per agent group
+        self.reward_spec = Composite({
+            "agents": Composite({
+                "reward": UnboundedContinuous(
+                    shape=torch.Size([self.num_drones, 1]),
+                    device=device
+                )
+            }, batch_size=torch.Size([self.num_drones]))
+        })
+        
+        # 4. Done/Terminal Specs (Global tracking at the root level)
+        self.done_spec = Composite({
+            "done": UnboundedDiscrete(shape=torch.Size([1]), dtype=torch.bool, device=device),
+            "terminated": UnboundedDiscrete(shape=torch.Size([1]), dtype=torch.bool, device=device)
+        })
+
+    def _reset(self, tensordict=None):
+        # Reset the underlying custom Webots PettingZoo environment
+        obs_dict = self.pz_env.reset()[0]
+        
+        # Stack individual drone observations into a single multi-agent tensor [num_drones, obs_dim]
+        obs_list = [torch.tensor(obs_dict[agent], dtype=torch.float32, device=self.device) for agent in self.agents]
+        stacked_obs = torch.stack(obs_list, dim=0)
+        
+        return TensorDict({
+            "agents": TensorDict({"observation": stacked_obs}, batch_size=torch.Size([self.num_drones]))
+        }, batch_size=torch.Size([]))
+
+    def _step(self, tensordict):
+        # 1. Pull the stacked action tensor from MAPPO [num_drones, action_dim]
+        action_tensor = tensordict["agents", "action"]
+        
+        # 2. Convert to an ordered list of numpy actions for your custom env step method
+        actions_list = [action_tensor[i].cpu().numpy() for i in range(self.num_drones)]
+        
+        # 3. Step the environment
+        obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict = self.pz_env.step(actions_list)
+        
+        # 4. Collect and restack observations and rewards into BenchMARL format
+        obs_list = [torch.tensor(obs_dict[agent], dtype=torch.float32, device=self.device) for agent in self.agents]
+        reward_list = [torch.tensor([reward_dict[agent]], dtype=torch.float32, device=self.device) for agent in self.agents]
+        
+        stacked_obs = torch.stack(obs_list, dim=0)
+        stacked_reward = torch.stack(reward_list, dim=0)
+        
+        # Determine episode completion conditions
+        done = any(terminated_dict.values()) or any(truncated_dict.values())
+        terminated = any(terminated_dict.values())
+        
+        return TensorDict({
+            "agents": TensorDict({
+                "observation": stacked_obs,
+                "reward": stacked_reward
+            }, batch_size=torch.Size([self.num_drones])),
+            "done": torch.tensor([done], dtype=torch.bool, device=self.device),
+            "terminated": torch.tensor([terminated], dtype=torch.bool, device=self.device)
+        }, batch_size=torch.Size([]))
+
+    def _set_seed(self, seed: Optional[int]):
+        pass
